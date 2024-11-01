@@ -3,12 +3,9 @@ import pandas as pd
 import tensorflow as tf
 import schedule
 import os
-import configparser
+import time
 
-# 从配置文件读取配置
-config = configparser.ConfigParser()
-config.read('config/config.ini')
-data_save_dir = config['settings']['data_save_dir']
+data_save_dir = 'data/raw_data'  # 数据保存目录
 
 def train_model():
     """训练 LSTM 模型"""
@@ -50,5 +47,6 @@ def train_model():
 schedule.every().day.at("00:00").do(train_model)
 
 while True:
+    train_model()
     schedule.run_pending()
     time.sleep(1)
