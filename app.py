@@ -7,6 +7,11 @@ import os
 import datetime
 import numpy as np
 import tensorflow as tf
+import pickle  # 添加这一行
+from sklearn.preprocessing import MinMaxScaler
+import pytz  # 添加这一行
+
+
 
 # 从配置文件读取配置
 config = configparser.ConfigParser()
@@ -18,19 +23,20 @@ data_save_dir = config['settings']['data_save_dir']
 
 # 设置代理
 proxies = {
-    "http": "http://127.0.0.1:10808",
-    "https": "http://127.0.0.1:10808"
+    "http": "http://127.0.0.1:7890",
+    "https": "http://127.0.0.1:7890"
 }
 
 client = Client(api_key, api_secret, requests_params={"proxies": proxies})
 
+china_tz = pytz.timezone('Asia/Shanghai')  # 定义中国时区
 
 def get_historical_klines(symbol, interval, start_str, end_str=None):
     """获取历史K线数据"""
     klines = client.get_historical_klines(symbol, interval, start_str, end_str)
     df = pd.DataFrame(klines, columns=['开盘时间', '开盘价', '最高价', '最低价', '收盘价', '成交量', '收盘时间', '成交额', '成交笔数', '主动买入成交量', '主动买入成交额', '忽略'])
-    df['开盘时间'] = pd.to_datetime(df['开盘时间'], unit='ms')
-    df['收盘时间'] = pd.to_datetime(df['收盘时间'], unit='ms')
+    df['开盘时间'] = pd.to_datetime(df['开盘时间'], unit='ms').dt.tz_localize('UTC').dt.tz_convert(china_tz)
+    df['收盘时间'] = pd.to_datetime(df['收盘时间'], unit='ms').dt.tz_localize('UTC').dt.tz_convert(china_tz)
     return df
 
 
@@ -38,8 +44,8 @@ def get_latest_klines(symbol, interval, start_timestamp):
     """获取从指定时间点开始的最新K线数据"""
     klines = client.get_klines(symbol=symbol, interval=interval, startTime=start_timestamp)
     df = pd.DataFrame(klines, columns=['开盘时间', '开盘价', '最高价', '最低价', '收盘价', '成交量', '收盘时间', '成交额', '成交笔数', '主动买入成交量', '主动买入成交额', '忽略'])
-    df['开盘时间'] = pd.to_datetime(df['开盘时间'], unit='ms')
-    df['收盘时间'] = pd.to_datetime(df['收盘时间'], unit='ms')
+    df['开盘时间'] = pd.to_datetime(df['开盘时间'], unit='ms').dt.tz_localize('UTC').dt.tz_convert(china_tz)
+    df['收盘时间'] = pd.to_datetime(df['收盘时间'], unit='ms').dt.tz_localize('UTC').dt.tz_convert(china_tz)
     return df
 
 
@@ -57,7 +63,7 @@ def update_data(symbol, interval):
         last_timestamp = None
 
     # 当前时间
-    current_timestamp = int(datetime.datetime.now().timestamp() * 1000)
+    current_timestamp = int(datetime.datetime.now(tz=china_tz).timestamp() * 1000)
 
     # 获取缺失的K线数据，直到最新时间
     all_new_data = []
@@ -89,27 +95,6 @@ def update_data(symbol, interval):
         print(f"{symbol} 数据已更新，共 {len(updated_df)} 行数据。")
 
 
-def extract_features():
-    """从收集的数据中提取特征，保存到新的 CSV 文件中"""
-    file_path_btc = os.path.join(data_save_dir, 'BTCUSDT_15m.csv')
-    if not os.path.exists(file_path_btc):
-        print("数据文件不存在，无法提取特征。")
-        return
-
-    df = pd.read_csv(file_path_btc)
-    df['收盘价'] = df['收盘价'].astype(float)
-
-    # 示例特征提取：计算均线
-    df['SMA'] = df['收盘价'].rolling(window=20).mean()
-    df['RSI'] = 100 - (100 / (1 + df['收盘价'].diff().apply(lambda x: max(x, 0)).rolling(window=14).mean() / df['收盘价'].diff().apply(lambda x: abs(x)).rolling(window=14).mean()))
-    df['MACD'] = df['收盘价'].ewm(span=12, adjust=False).mean() - df['收盘价'].ewm(span=26, adjust=False).mean()
-
-    # 保存特征数据
-    features_path = os.path.join(data_save_dir, 'processed_data.csv')
-    df.to_csv(features_path, index=False)
-    print("特征提取完成。")
-
-
 def train_model():
     """训练 LSTM 模型"""
     features_path = os.path.join(data_save_dir, 'processed_data.csv')
@@ -130,49 +115,110 @@ def train_model():
 
     X = np.array(X)
     y = np.array(y)
-    X = np.expand_dims(X, axis=2)
+
+    # 修改这里，确保输入形状为 (batch_size, timesteps, features)
+    # 当前 X 的形状为 (samples, sequence_length, features)，不需要 expand_dims
+    # 原代码多了一步 expand_dims，导致多了一个额外的维度
+    # X = np.expand_dims(X, axis=2)  # 原代码，错误
+    # 正确的形状应为 (samples, timesteps, features)，即 (batch_size, 50, 4)
 
     # 创建模型
     model = tf.keras.models.Sequential([
-        tf.keras.layers.LSTM(50, return_sequences=True, input_shape=(X.shape[1], X.shape[2])),
-        tf.keras.layers.LSTM(50),
+        tf.keras.layers.LSTM(20, return_sequences=False, input_shape=(X.shape[1], X.shape[2])),
         tf.keras.layers.Dense(1)
     ])
+
     model.compile(optimizer='adam', loss='mse')
 
     # 训练模型
-    model.fit(X, y, epochs=10, batch_size=32)
+    model.fit(X, y, epochs=10, batch_size=16)
     # 保存模型
     model.save('models/BTCUSDT_15m_lstm_model.h5')
     print("模型已保存")
 
 
+
+
+def extract_features():
+    """从收集的数据中提取特征，保存到新的 CSV 文件中"""
+    file_path_btc = os.path.join(data_save_dir, 'BTCUSDT_15m.csv')
+    if not os.path.exists(file_path_btc):
+        print("数据文件不存在，无法提取特征。")
+        return
+
+    df = pd.read_csv(file_path_btc)
+    df['收盘价'] = df['收盘价'].astype(float)
+
+    # 特征提取：计算均线、RSI 和 MACD
+    df['SMA'] = df['收盘价'].rolling(window=20).mean()
+    df['RSI'] = 100 - (100 / (1 + df['收盘价'].diff().apply(lambda x: max(x, 0)).rolling(window=14).mean() / df['收盘价'].diff().apply(lambda x: abs(x)).rolling(window=14).mean()))
+    df['MACD'] = df['收盘价'].ewm(span=12, adjust=False).mean() - df['收盘价'].ewm(span=26, adjust=False).mean()
+
+    # 删除 NaN 数据
+    df = df.dropna()
+
+    # 对特征进行归一化
+    scaler = MinMaxScaler()
+    df[['收盘价', 'SMA', 'RSI', 'MACD']] = scaler.fit_transform(df[['收盘价', 'SMA', 'RSI', 'MACD']])
+
+    # 保存特征数据和 scaler 对象
+    features_path = os.path.join(data_save_dir, 'processed_data.csv')
+    df.to_csv(features_path, index=False)
+    scaler_path = os.path.join(data_save_dir, 'scaler.pkl')
+    with open(scaler_path, 'wb') as f:
+        import pickle
+        pickle.dump(scaler, f)
+
+    print("特征提取完成并保存。")
+
 def predict():
     """使用最新数据进行预测"""
     model_path = 'models/BTCUSDT_15m_lstm_model.h5'
-    if not os.path.exists(model_path):
-        print("模型不存在，无法进行预测。")
+    scaler_path = os.path.join(data_save_dir, 'scaler.pkl')
+    if not os.path.exists(model_path) or not os.path.exists(scaler_path):
+        print("模型或 scaler 不存在，无法进行预测。")
         return
 
-    # 加载模型
-    model = tf.keras.models.load_model(model_path)
+    # 加载模型并重新编译
+    model = tf.keras.models.load_model(model_path, compile=False)
+    model.compile(optimizer='adam', loss='mse')
+
+    # 加载特征数据
     features_path = os.path.join(data_save_dir, 'processed_data.csv')
     df = pd.read_csv(features_path).dropna()
 
+    # 加载 scaler
+    with open(scaler_path, 'rb') as f:
+        scaler = pickle.load(f)
+
     # 使用最新的 50 条数据进行预测
     X = df[['收盘价', 'SMA', 'RSI', 'MACD']].iloc[-50:].values
-    X = np.expand_dims(X, axis=(0, 2))
+    X = np.expand_dims(X, axis=0)  # 改为只在第一个维度添加扩展，即 (1, 50, 4)
 
     # 进行预测
     prediction = model.predict(X)
-    print("预测值：", prediction[-1])
+
+    # 反归一化预测结果
+    predicted_price = scaler.inverse_transform([[prediction[-1][0], 0, 0, 0]])[0][0]
+    current_time = datetime.datetime.now(tz=china_tz).strftime('%Y-%m-%d %H:%M:%S')
+    log_message = f"{current_time} - 预测值：{predicted_price}"
+
+    # 打印到控制台
+    print(log_message)
+
+    # 写入日志文件
+    log_file_path = 'log.txt'
+    with open(log_file_path, 'a') as log_file:
+        log_file.write(log_message + '\n')
+
+
 
 
 # 每 15 分钟运行数据更新、特征提取、模型训练和预测
-schedule.every(15).minutes.do(update_data, symbol='BTCUSDT', interval=Client.KLINE_INTERVAL_15MINUTE)
-schedule.every(15).minutes.do(extract_features)
-schedule.every(15).minutes.do(train_model)
-schedule.every(15).minutes.do(predict)
+schedule.every(1).minutes.do(update_data, symbol='BTCUSDT', interval=Client.KLINE_INTERVAL_15MINUTE)
+schedule.every(1).minutes.do(extract_features)
+schedule.every(1).minutes.do(train_model)
+schedule.every(1).minutes.do(predict)
 
 while True:
     schedule.run_pending()
